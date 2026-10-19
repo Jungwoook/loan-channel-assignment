@@ -64,25 +64,56 @@
 
 ### GET `/api/terms`
 
-- 약관 조회
+- 동의 화면의 약관 목록과 현재 버전 조회. 성공: 200 OK.
+- 각 약관의 현재 버전(TermsVersion.current_yn = `Y`)만 반환한다. `display_order` 오름차순이다.
 
 응답 예시
 
 ```json
 {
-    "terms": "약관"
+    "terms": [
+        {
+            "term_id": 1,
+            "term_name": "개인(신용)정보 수집·이용 동의",
+            "required_yn": "Y",
+            "display_order": 1,
+            "version_id": 11,
+            "version_no": 3
+        },
+        {
+            "term_id": 4,
+            "term_name": "마케팅 정보 수신 동의",
+            "required_yn": "N",
+            "display_order": 4,
+            "version_id": 14,
+            "version_no": 1
+        }
+    ]
 }
 ```
 
+### GET `/api/terms/{term_id}/versions/{version_id}/file`
+
+- 약관 PDF 열람(FR-13). 성공: 200 OK, `Content-Type: application/pdf`.
+- 고객은 현재 버전만 열람할 수 있다. 이전 버전 요청은 404로 응답한다. `version_id`가 `term_id`에 속하지 않아도 404다.
+
 ### POST `/api/terms/consent`
 
-- 약관 동의
+- 약관 동의 저장. 성공: 201 Created.
+- 모든 약관 항목을 한 번에 보낸다. 항목이 빠졌거나, 필수 약관이 `false`이면 400으로 거부한다.
+- `version_id`는 목록 조회에서 받은 버전을 그대로 보내며, 동의 이력에 그대로 기록한다. 약관 교체에 따른 재동의·버전 불일치는 고려하지 않는다.
+- 항목별 TermsConsent 행을 한 트랜잭션으로 저장한다. 동의 일시는 서버가 정한다.
 
 요청 예시
 
 ```json
 {
-  
+    "consents": [
+        { "term_id": 1, "version_id": 11, "agreed": true },
+        { "term_id": 2, "version_id": 12, "agreed": true },
+        { "term_id": 3, "version_id": 13, "agreed": true },
+        { "term_id": 4, "version_id": 14, "agreed": false }
+    ]
 }
 ```
 
@@ -90,9 +121,13 @@
 
 ```json
 {
-  
+    "user_id": "customer01",
+    "consented_dt": "2026-10-16T09:58:00+09:00",
+    "required_consented": true
 }
 ```
+
+- 한도 조회·신청 제출은 모든 필수 약관에 동의한 고객만 허용하며, 아니면 403과 함께 약관 동의 필요 코드를 반환한다.
 
 ### POST `/api/check-limit`
 
@@ -131,7 +166,9 @@
     "requested_amount": 10000000,
     "loan_term": 24,
     "annual_income": null,
-    "employment_type": null
+    "employment_type": null,
+    "employment_months": null,
+    "existing_debt": null
 }
 ```
 
@@ -146,6 +183,8 @@
     "loan_term": 24,
     "annual_income": null,
     "employment_type": null,
+    "employment_months": null,
+    "existing_debt": null,
     "status": "작성중",
     "created_dt": "2026-10-16T10:00:00+09:00",
     "updated_dt": "2026-10-16T10:00:00+09:00",
@@ -157,14 +196,16 @@
 ### POST `/api/application/{application_id}`
 
 - 본인의 작성중 신청 수정 및 임시저장. 성공: 200 OK.
-- 수정 가능한 필드는 `product_key`, `requested_amount`, `loan_term`, `annual_income`, `employment_type`이다.
+- 수정 가능한 필드는 `product_key`, `requested_amount`, `loan_term`, `annual_income`, `employment_type`, `employment_months`, `existing_debt`이다.
 - 생략한 필드는 유지하고, 명시적으로 NULL을 보낸 입력 필드는 비운다. `product_key`는 NULL로 변경할 수 없다.
 - 제출 이후 수정 요청은 409로 거부한다.
 
 ```json
 {
     "annual_income": 50000000,
-    "employment_type": "직장인"
+    "employment_type": "직장인",
+    "employment_months": 36,
+    "existing_debt": 5000000
 }
 ```
 
@@ -181,9 +222,9 @@
 ### POST `/api/application/{application_id}/submit`
 
 - 저장된 신청서 제출. 요청 본문은 없다. 최신 입력값은 먼저 `POST /api/application/{application_id}`로 저장한다.
-- `Idempotency-Key` 헤더는 필수다. 동일 사용자·엔드포인트에서 같은 키와 같은 요청을 재전송하면 최초 응답을 반환하며 새 심사 행을 만들지 않는다. 같은 키를 다른 신청에 사용하면 409로 거부한다.
-- 금액·기간·연소득·직업 구분의 필수값, 상품 상태 `ACTIVE`, 상품 금액·기간 범위와 서버에서 계산한 고객별 한도를 검증한다. 클라이언트의 예상 한도·금리를 제출값으로 신뢰하지 않는다.
-- 신청의 `제출완료` 전환, `submitted_dt` 설정, 회차 1의 LoanReview 생성 및 상태 이력 저장을 하나의 트랜잭션으로 처리한다.
+- `Idempotency-Key` 헤더는 필수다. 동일 사용자가 같은 키로 같은 신청을 다시 제출하면 SubmitIdempotency에 저장한 최초 응답을 그대로 반환하며 새 심사 행을 만들지 않는다. 제출에 실패한 응답은 저장하지 않으므로 같은 키로 다시 시도할 수 있다. 같은 키를 다른 신청에 사용하면 409로 거부한다.
+- 금액·기간·연소득·직업 구분·재직기간·기존 부채의 필수값, 필수 약관 동의 여부, 상품 상태 `ACTIVE`, 상품 금액·기간 범위와 서버에서 계산한 고객별 한도를 검증한다. 클라이언트의 예상 한도·금리를 제출값으로 신뢰하지 않는다.
+- 신청의 `제출완료` 전환, `submitted_dt` 설정, 회차 1의 LoanReview 생성, ApplicationStatusHistory 추가, SubmitIdempotency 응답 저장을 하나의 트랜잭션으로 처리한다.
 - 성공: 202 Accepted. 응답은 로컬 제출 접수 결과이며 외부 심사 접수 완료를 의미하지 않는다. 이후 상태는 상세 조회로 확인한다.
 
 요청 헤더 예시
@@ -228,6 +269,8 @@ Idempotency-Key: 8ed4ecdb-6068-447d-b47f-c497f048bde9
     "loan_term": 24,
     "annual_income": 50000000,
     "employment_type": "직장인",
+    "employment_months": 36,
+    "existing_debt": 5000000,
     "status": "승인",
     "created_dt": "2026-10-16T10:00:00+09:00",
     "updated_dt": "2026-10-16T10:12:00+09:00",
@@ -245,6 +288,17 @@ Idempotency-Key: 8ed4ecdb-6068-447d-b47f-c497f048bde9
         "updated_dt": "2026-10-16T10:12:00+09:00"
     }
 }
+```
+
+- `status_history`는 ApplicationStatusHistory를 `changed_dt` 오름차순으로 반환한 진행 이력이다. 위 예시에서는 생략했으며 형식은 아래와 같다.
+
+```json
+"status_history": [
+    { "from_status": null, "to_status": "작성중", "changed_by_type": "고객", "changed_dt": "2026-10-16T10:00:00+09:00" },
+    { "from_status": "작성중", "to_status": "제출완료", "changed_by_type": "고객", "changed_dt": "2026-10-16T10:10:00+09:00" },
+    { "from_status": "제출완료", "to_status": "심사중", "changed_by_type": "시스템", "changed_dt": "2026-10-16T10:10:01+09:00" },
+    { "from_status": "심사중", "to_status": "승인", "changed_by_type": "외부심사", "changed_dt": "2026-10-16T10:12:00+09:00" }
+]
 ```
 
 - 승인 전 및 거절 시 승인 금액·금리는 NULL이다. 거절 사유는 외부 서버가 제공한 경우 반환한다. 결과 전에는 `result_received_dt`도 NULL이다.
@@ -276,7 +330,7 @@ Idempotency-Key: 8ed4ecdb-6068-447d-b47f-c497f048bde9
 }
 ```
 
-- 회차별 심사 이력이며 개별 상태 변경·전송 시도 로그는 아니다. 현재 업무 규칙에서는 신청당 최초 심사 한 건만 생성한다.
+- 회차별 심사 이력이며 개별 상태 변경·전송 시도 로그는 아니다. 상태 변경 이력은 상세 조회의 `status_history`로 확인한다. 현재 업무 규칙에서는 신청당 최초 심사 한 건만 생성한다.
 
 ## 외부 심사 연동에 반영할 규칙
 
@@ -287,6 +341,6 @@ Idempotency-Key: 8ed4ecdb-6068-447d-b47f-c497f048bde9
 
 ## ERD 및 연동 계약 확인 필요 사항
 
-- 최신 LoanApplication 컬럼에는 재직기간·기존 부채가 없지만, ERD의 검증 설명·request_payload 설명과 docs.md의 Mock 요청에는 두 항목이 남아 있다. 현재 사용자 API에 임의로 추가하지 않았으며, 외부 심사 구현 전 컬럼 복원 또는 계약 변경과 데이터 출처를 확정해야 한다.
-- 상태 이력과 제출 멱등성 응답 보관은 docs.md의 요구사항이지만 현재 ERD에 저장 구조가 없다. 위 제출 API를 구현하려면 해당 저장 구조를 추가 설계해야 한다.
-- 약관 API는 이번 User·Product·LoanApplication·LoanReview 변경 대상이 아니므로 기존 초안을 유지한다. 약관 동의 요청·응답은 관련 ERD 확정 후 보완한다.
+- 재직기간·기존 부채는 LoanApplication의 `employment_months`, `existing_debt`로 추가했다. Mock 요청의 재직기간 단위(개월·년)는 Mock 계약 확인 후 변환 여부를 정한다.
+- 상태 이력은 ApplicationStatusHistory, 제출 멱등성 응답은 SubmitIdempotency, 약관은 Terms·TermsVersion·TermsConsent로 ERD에 추가했다.
+- 한도 조회 이력(KPI·퍼널)과 외부 연동 로그(TR-09)의 저장 구조는 아직 ERD에 없다.
