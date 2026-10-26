@@ -1,3 +1,9 @@
 spring:
   application:
     name: loan-channel-assignment
+
+  datasource:
+    driver-class-name: oracle.jdbc.OracleDriver
+    url: jdbc:oracle:thin:@localhost:1521/freepdb1
+    username: loan_user
+    password: LoanUser123
